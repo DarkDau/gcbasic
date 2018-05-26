@@ -1,0 +1,600 @@
+''' AMMUNITION COUNTER FOR LARP GUNS
+'''@author  Darkdau
+'''@licence GPL
+'''@version 2.1
+'''@date    06.10.17
+''' Version log
+'''*********************************************************************
+''' 18.10.2017: optimized Display, cleanup
+''' 21.10.2017: Voltage Control, displays Warnings when Voltage is too low
+''' 28.10.2017: Placing Labels for easier navigation in GeanyCleanup 
+
+#CHIP 18f25k22, 16
+#OPTION EXPLICIT
+'#DEFINE LOWBATT 300   ' ca. 3.0 Volts Displays Charge! in Main screen
+'#DEFINE ENDBATT 255   ' ca. 2.55 Volts as absolute Minimum for Li Ion Accu
+'You can set ENDBATT to 200, when using 3 AA Batteries
+#DEFINE LOWBATT 288   ' ca. 2.8 Volts Displays Charge! in Main screen
+#DEFINE ENDBATT 200   ' ca. 2.0 Volts Display Alert!
+
+'Potentiometer is to modify the Brightness of the Display
+#DEFINE Potentiometer   PORTA.1
+DIR     Potentiometer In 
+#DEFINE LEDD1 PORTA.3 'This is the Flash! connect to Transistor at PCB
+DIR     LEDD1         OUT
+#DEFINE LEDD2 PORTA.4 'This is the Flash! connect to Transistor at Prototype
+
+DIR     LEDD2         OUT
+'Possible that I decide another LED for showing the flash Timing 
+'with much smaller intense
+
+#DEFINE S2DOWN       PORTB.2 ' S2 
+DIR S2DOWN in
+
+#DEFINE S3UP      PORTB.0 ' S3
+DIR S3UP in
+#DEFINE REFLEX PORTB.5
+DIR REFLEX in
+
+
+' Define I2C settings - CHANGE PORTS
+#DEFINE HI2C_BAUD_RATE 400
+#DEFINE HI2C_DATA PORTC.4
+#DEFINE HI2C_CLOCK PORTC.3
+'Initialise I2C Slave
+'I2C pins need to be input for SSP module
+DIR HI2C_DATA in
+DIR HI2C_CLOCK in
+'MASTER
+HI2CMode Master
+
+#INCLUDE <glcd.h>
+'----- Define GLCD Hardware settings
+' If no 128x32 Pixel Display is on hand, but a 128x64
+' it can be used also.
+
+'Settigns for 128x32 Pixel Display
+#DEFINE GLCD_TYPE GLCD_TYPE_SSD1306_32
+#DEFINE FAKE32 0
+
+'Settings for the  128x64 Pixel Display
+'#DEFINE GLCD_TYPE GLCD_TYPE_SSD1306
+'#DEFINE FAKE32 32
+
+#DEFINE GLCD_I2C_Address 0x78
+' ----- Define variables
+
+#DEFINE GLCD_PROTECTOVERRUN
+
+#DEFINE Magazine PortB.4
+DIR Magazine in
+
+DIM FLASHTIME,ROUNDS,ROUNDSPREV,MENUTIMEOUT,ADCVal,INTCNT,MUNMAX,Easter,BATT AS BYTE
+DIM LOWMUN,MAGSTATE AS BIT
+'DIM VOLTS AS STRING
+DIM ad_val  AS  word
+DIM Volts AS BYTE
+DIM hundredths AS BYTE
+
+MUNMAX = 12
+' set the Location in EEPROM for Data Store
+#DEFINE EEFLASH 	0
+#DEFINE EEMUN 		1
+#DEFINE EEMAGSTATE 	2
+#DEFINE DOWN        0
+#DEFINE UP          1
+ 
+epread EEFLASH,FLASHTIME
+epread EEMUN,ROUNDS
+' because EEMUN is after Compile (first run) 255 we have an indicator
+IF ROUNDS > 250 THEN
+   epwrite EEMUN,MUNMAX
+   epwrite EEFLASH,100
+   ROUNDS = MUNMAX
+END IF
+' standard 127
+MENUTIMEOUT = 12
+; ----- Main program
+ExtraFont
+#DEFINE GLCD_OLED_FONT
+ INTCNT = 0
+' Init the Mazazine
+InitMag 
+ ' PortBchange or PortChange
+ON Interrupt PORTBChange CALL ISR_Handle
+ 
+'Evans Contrast Setting for the ssd1306, it is very bright
+Write_Command_SSD1306(SSD1306_SETCONTRAST)
+Write_Command_SSD1306(127)   ;0-255
+Write_Command_SSD1306(SSD1306_SETVCOMDETECT)
+Write_Command_SSD1306(0)  ' 0x40 default, to lower the contrast, put 0
+
+InitMag 
+
+POWER_ON_SCREEN:
+GLCDCLS
+Easter=0
+GLCDDrawString 0, 0 + FAKE32,   "Power Warning at:"
+GLCDPrint (75,0 + FAKE32,LOWBATT)
+GLCDDrawString 0, 8 + FAKE32,   "Power Alert at  :"
+GLCDPrint (75, 8 + FAKE32, ENDBATT)
+GLCDDrawString 0, 16 + FAKE32,   "Reading at     :"
+
+'GLCDDrawString 0,24 + FAKE32,   "(V1.00)         (c) by Darkdau"
+DO forever
+	IF (S2down = DOWN AND S3up = DOWN) THEN
+		EasterEgg
+	END IF
+	Easter= Easter + 1
+	WAIT 100 ms
+	IF Easter >60 THEN
+		EXIT DO
+	END IF
+	IF (S3up = DOWN AND S2down = ON) THEN
+	WAIT 250 ms
+		IF (S3up = DOWN AND S2down = ON) THEN
+			EXIT DO
+		END IF
+	END IF	
+	IF Easter >10 THEN
+		GLCDDrawString 0,24 + FAKE32,   "Press UP key to Continue "
+	'		GLCDPrint (85,24 + FAKE32,AD_VAL)
+	END IF
+Voltage
+
+    IF (ad_val < LOWBATT AND ad_val > ENDBATT) THEN
+		GLCDPrint (0,0 + FAKE32, "Warning! ACCU needs Charge! ")
+		WAIT 100 ms
+	END IF
+    IF ad_val < ENDBATT THEN
+		GLCDPrint (0,7 + FAKE32, "ALERT! Do not use ACCU Empty")
+	END IF
+	GLCDPrint (70,16 + FAKE32,Volts)
+	GLCDPrint (75,16 + FAKE32, ".")        ;decimal POINT
+	IF hundredths < 10 THEN 
+		GLCDPrint (80,16 + FAKE32,"0")
+		GLCDPrint (85,16 + FAKE32,hundredths)
+	ELSE
+		GLCDPrint (80,16 + FAKE32,hundredths)
+	END IF
+	GLCDPrint (90,16 + FAKE32,"V")
+  MagChange
+LOOP
+  LOWMUN = 0
+  GLCDCLS
+  WAIT 1 s
+  IOCB5 = 1 ' Trigger
+'  IOCB4 = 1 ' Magazine
+MAIN_SCREEN:
+Easter = 0
+  DO forever
+	ADCVal =  ReadAD ( Potentiometer )
+    GLCDPrint ( 60, 0 + FAKE32,	 "The 138's Special") 
+	GLCDPrint ( 60, 10 + FAKE32, "Arm Controller")
+	if AD_VAL < LOWBATT THEN
+		GLCDPrint ( 60, 24 + FAKE32, "_______________________________") 
+    ELSE
+		GLCDPrint ( 60, 24 + FAKE32, "UP+DOWN->Setup") 
+    END IF
+    GLCDPrint ( 5, 21 + FAKE32, "Rounds") 
+    IF ROUNDS <0 THEN
+		ROUNDS = 0
+	END IF	
+    GLCDfntDefaultsize = 2
+    Voltage
+	IF (ROUNDS < 4 AND LOWMUN=0) THEN
+		SetContrast_SSD1306 (255)
+		WAIT 20 ms
+		GLCDPrint ( 5,5 + FAKE32,"  ")
+		LOWMUN = 1
+		WAIT 100 ms
+	ELSE
+		SetContrast_SSD1306 (ADCVal)
+		IF ROUNDS <> ROUNDSPREV THEN
+			GLCDPrint ( 5,5 + FAKE32,"  ")
+			ROUNDSPREV = ROUNDS
+		END IF	
+        GLCDPrint ( 5,5 + FAKE32, ROUNDS)
+    	LOWMUN = 0
+    	WAIT 100 ms
+    END IF
+    GLCDfntDefaultsize = 1
+    Voltage
+    IF (ad_val < LOWBATT AND ad_val > ENDBATT) THEN
+		GLCDPrint (60,24 + FAKE32,"Charge or Change")
+	END IF
+    IF ad_val < ENDBATT THEN
+		GLCDPrint (60,24 + FAKE32,"Alert! Charge or  ")
+	WAIT 100 ms
+	END IF
+	
+   Cartridge
+
+    IF (S2down = DOWN AND S3up = DOWN) THEN
+	   epwrite EEFLASH, FLASHTIME
+	   Propmenu
+	END IF
+	MagChange
+	' Moving Pixel
+	'PSET 60 + Easter,22 + FAKE32,1
+	'PSET 61 + Easter,22 + FAKE32,1
+	'Easter = Easter + 1
+	'IF Easter > 2 THEN
+		'PSET 60 + Easter-2,22 + FAKE32,0
+		'PSET 61 + Easter-2,22 + FAKE32,0
+	'END IF
+	'If Easter >63 THEN
+		'Easter = 0
+	'END IF
+  LOOP   
+'----------
+' sub Probmenue is the FLASHTIME_SCREEN
+SUB Propmenu
+GLCDCLS
+FLASHTIME_SCREEN:
+' Standard 30 the lower the longer lasts timeout
+  MENUTIMEOUT = 30
+  DO forever
+    GLCDPrint ( 0, 0 + FAKE32, "138's Special Arms Controller")  
+    GLCDPrint ( 0, 10 + FAKE32, "Rounds:    ")
+    GLCDPrint ( 0, 19 + FAKE32, "Flash:      ")
+    GLCDPrint ( 35, 10 + FAKE32, ROUNDS)
+    GLCDPrint ( 30, 19 + FAKE32, FLASHTIME *10) ' because of the wait 10 µs
+	GLCDPrint ( 52, 19 + FAKE32, "#s") 'the µ
+    box (65,11 + FAKE32,120,30 + FAKE32)        
+    GLCDPrint ( 72,12 + FAKE32,"Setup Mun")
+    GLCDPrint ( 72,21 + FAKE32,"Press U+D")
+   filledbox (0,30 + FAKE32,MENUTIMEOUT,31 + FAKE32,1)
+	IF  S3up = DOWN  THEN
+        WAIT 1 ms
+	    IF  S3up = DOWN  THEN
+			'Key PB pressed 
+			 FLASHTIME = FLASHTIME +1
+			 MENUTIMEOUT = MENUTIMEOUT -2
+		END IF
+	END IF	
+	IF  (S2down = DOWN) THEN
+		WAIT 1 ms
+		IF (S2down = DOWN) THEN
+			FLASHTIME = FLASHTIME -1
+			MENUTIMEOUT = MENUTIMEOUT -2
+		END IF
+	END IF
+	IF FLASHTIME = 0 THEN
+		FLASHTIME = 1
+	END IF	
+	IF (S2down = DOWN AND S3up = DOWN) THEN
+	   epwrite EEFLASH, FLASHTIME
+	   WAIT 1 sec
+	   glcdcls
+	   Mun
+	END IF
+
+    MENUTIMEOUT = MENUTIMEOUT +2
+    IF MENUTIMEOUT > 125 THEN
+      glcdcls
+	  EXIT SUB
+    END IF
+    MagChange
+   LOOP
+   glcdcls
+ END SUB 
+  
+  SUB Mun
+ROUNDSCREEN:
+'' Here is the Munition Preset Routine
+MENUTIMEOUT = 30
+GLCDCLS
+DO forever	
+	IF ( S3up = DOWN ) THEN
+       WAIT 1 ms
+       IF ( S3up = DOWN ) THEN
+			' Key PB pressed 
+			 ROUNDS = ROUNDS +1
+			 MENUTIMEOUT = MENUTIMEOUT -1
+		END IF
+	END IF		
+	IF  S2down = DOWN THEN
+		WAIT 1 ms
+		IF (S2down = DOWN) THEN
+			ROUNDS = ROUNDS -1 
+			MENUTIMEOUT = MENUTIMEOUT -1
+		END IF
+	END IF
+	IF ROUNDS = 0 THEN
+		ROUNDS = 1
+	END IF
+	' 30 normally
+	IF ROUNDS > MUNMAX THEN
+	   ROUNDS = MUNMAX
+	END IF   
+	' are BOTH Buttons pressed simultan?
+	IF (S2down = DOWN AND S3up = DOWN) THEN
+	glcdcls
+    GLCDPrint ( 1, 1 + FAKE32, "Saving Max of Magazine  ")
+    GLCDPrint ( 1, 10 + FAKE32, "Rounds:   ")
+    GLCDPrint ( 48, 10 + FAKE32, ROUNDS)
+	   epwrite EEMUN, ROUNDS
+	   WAIT 1 sec
+	   glcdcls
+	   EXIT SUB
+	END IF
+    GLCDPrint  ( 1, 1 + FAKE32, "Set Max of Magazine")
+    GLCDPrint ( 1, 10 + FAKE32, "Rounds:        ")
+	GLCDPrint ( 48, 10 + FAKE32, "   ")
+    GLCDPrint ( 48, 10 + FAKE32, ROUNDS)
+    box (77,11 + FAKE32,125,30 + FAKE32) 
+    GLCDPrint ( 80,12 + FAKE32,"To save")
+    GLCDPrint ( 80,21 + FAKE32,"press U+D")
+    filledbox (0,30 + FAKE32,MENUTIMEOUT,31 + FAKE32,1)
+    MENUTIMEOUT = MENUTIMEOUT +2
+    IF MENUTIMEOUT >125 THEN
+        glcdcls
+		EXIT SUB
+    END IF
+	WAIT 150 ms
+	MagChange
+LOOP
+END SUB 
+''Interrupt Handling
+SUB ISR_Handle
+'ignore interrupts while in this Routine
+ IntOff      
+ ' REFLEX is 0 when Triggered through Bullet
+	IF (REFLEX = 0 AND ROUNDS >0) THEN 
+		ROUNDS = ROUNDS -1
+		IF ROUNDS <0 THEN
+			ROUNDS=0
+		END IF
+	Set LEDD1  ON 
+	WAIT FLASHTIME 10us
+	Set LEDD1 Off
+	WAIT FLASHTIME 10us
+	IntOn
+	EXIT SUB   
+	END IF	
+	're-enable interrupts
+	IntOn               
+END SUB
+
+'sub InitMag
+'Need to be called before Interrupt enabled
+'find  out if the Magazine is insert or not 
+SUB InitMag
+' The Switch is closed, when Magazine is insert
+	DIR MAGAZINE IN
+	'Stored for Future use
+	IF MAGAZINE = 1 THEN
+		set MAGSTATE ON
+	ELSE
+		set MAGSTATE OFF
+	END IF	
+	epwrite EEMAGSTATE, MAGSTATE 
+END SUB
+
+SUB ExtraFont
+
+#DEFINE OLEDFont2 OLEDExtendedFont2
+
+#DEFINE OLEDFont1DATA myOLEDFont1DATA
+Table myOLEDFont1DATA
+
+    1, 0x00                   ' Space
+    1, 0x5E                   ' !
+    3, 0x06, 0x00, 0x06     ' "
+    5, 0x40, 0x3e, 0x20, 0x20, 0x1e    ' mu
+    5, 0x24, 0x2A, 0x7F, 0x2A, 0x10 ' $
+    3, 0x62, 0x18, 0x46     ' %
+    5, 0x30, 0x4C, 0x5A, 0x24, 0x50 ' &
+    1, 0x06                   ' '
+    2, 0x3C, 0x42              ' (
+    2, 0x42, 0x3C              ' )
+    5, 0x28, 0x10, 0x7C, 0x10, 0x28 ' *
+    3, 0x10, 0x38, 0x10     ' +
+    1, 0xC0                   ' ,
+    3, 0x10, 0x10, 0x10     ' -
+    1, 0x40                   ' .
+    3, 0x60, 0x18, 0x06     ' /
+    4, 0x3C, 0x42, 0x42, 0x3C   ' 0
+    3, 0x44, 0x7E, 0x40     ' 1
+    4, 0x44, 0x62, 0x52, 0x4C   ' 2
+    3, 0x4A, 0x4A, 0x34     ' 3
+    4, 0x1E, 0x10, 0x7C, 0x10   ' 4
+    3, 0x4E, 0x4A, 0x32     ' 5
+    4, 0x3C, 0x4A, 0x4A, 0x30   ' 6
+    3, 0x62, 0x12, 0x0E     ' 7
+    4, 0x34, 0x4A, 0x4A, 0x34   ' 8
+    4, 0x0C, 0x52, 0x52, 0x3C   ' 9
+    1, 0x48                   ' Doppelpunk 
+    2, 0x80, 0x68              ' ;
+    3, 0x10, 0x28, 0x44     ' <
+    3, 0x28, 0x28, 0x28     ' =
+    3, 0x44, 0x28, 0x10     ' >
+    3, 0x02, 0x52, 0x0C     ' ?
+    5, 0x38, 0x44, 0x54, 0x54, 0x58 ' @
+    4, 0x7C, 0x12, 0x12, 0x7C   ' A
+    4, 0x7E, 0x4A, 0x4A, 0x34   ' B
+    4, 0x3C, 0x42, 0x42, 0x24   ' C
+    4, 0x7E, 0x42, 0x42, 0x3C   ' D
+    3, 0x7E, 0x4A, 0x4A     ' E
+    3, 0x7E, 0x0A, 0x0A     ' F
+    4, 0x3C, 0x42, 0x52, 0x34   ' G
+    4, 0x7E, 0x08, 0x08, 0x7E   ' H
+    3, 0x42, 0x7E, 0x42     ' I
+    3, 0x42, 0x42, 0x3E     ' J
+    4, 0x7E, 0x08, 0x14, 0x62    ' K
+    3, 0x7E, 0x40, 0x40     ' L
+    5, 0x7E, 0x04, 0x08, 0x04, 0x7E ' M
+    5, 0x7E, 0x04, 0x18, 0x20, 0x7E ' N
+    4, 0x3C, 0x42, 0x42, 0x3C   ' O
+    4, 0x7E, 0x12, 0x12, 0x0C   ' P
+    4, 0x3C, 0x42, 0x42, 0xBC   ' Q
+    4, 0x7E, 0x12, 0x12, 0x6C   ' R
+    4, 0x44, 0x4A, 0x4A, 0x30   ' S
+    3, 0x02, 0x7E, 0x02     ' T
+    4, 0x3E, 0x40, 0x40, 0x3E   ' U
+    5, 0x06, 0x18, 0x60, 0x18, 0x06 ' V
+    5, 0x3E, 0x40, 0x3E, 0x40, 0x3E ' W
+    5, 0x42, 0x24, 0x18, 0x24, 0x42 ' X
+    4, 0x9E, 0xA0, 0xA0, 0x7E   ' Y
+    4, 0x62, 0x52, 0x4A, 0x46   ' Z
+    2, 0x7E, 0x42              ' [
+    3, 0x06, 0x18, 0x60     ' Backslash
+    2, 0x42, 0x7E              ' ]
+    3, 0x20, 0x10, 0x20     ' ^
+    4, 0x80, 0x80, 0x80, 0x80   ' _
+    2, 0x04, 0x08              ' `
+    4, 0x20, 0x54, 0x54, 0x78   ' a
+    4, 0x7E, 0x44, 0x44, 0x38   ' b
+    4, 0x38, 0x44, 0x44, 0x28   ' c
+    4, 0x38, 0x44, 0x44, 0x7E   ' d
+    4, 0x38, 0x54, 0x54, 0x58   ' e
+    2, 0x7C, 0x0A              ' f
+    4, 0x98, 0xA4, 0xA4, 0x7C   ' g
+    4, 0x7E, 0x04, 0x04, 0x78   ' h
+    1, 0x7A                   ' i
+    2, 0x40, 0x3A              ' j
+    4, 0x7E, 0x10, 0x28, 0x44   ' k
+    1, 0x7E                   ' l
+    5, 0x7C, 0x04, 0x78, 0x04, 0x78 ' m
+    4, 0x7C, 0x04, 0x04, 0x78   ' n
+    4, 0x38, 0x44, 0x44, 0x38   ' o
+    4, 0xFC, 0x24, 0x24, 0x18   ' p
+    4, 0x18, 0x24, 0x24, 0xFC   ' q
+    2, 0x7C, 0x04              ' r
+    4, 0x48, 0x54, 0x54, 0x20   ' s
+    3, 0x04, 0x3E, 0x44     ' t
+    4, 0x3C, 0x40, 0x40, 0x3C    ' u
+    5, 0x0C, 0x30, 0x40, 0x30, 0x0C ' v
+    5, 0x3C, 0x40, 0x3C, 0x40, 0x3C ' w
+    5, 0x44, 0x28, 0x10, 0x28, 0x44 ' x
+    4, 0x9C, 0xA0, 0xA0, 0x7C   ' y
+    3, 0x64, 0x54, 0x4C     ' z
+    3, 0x08, 0x36, 0x41     ' {
+    1, 0xFF                   ' |
+    3, 0x41, 0x36, 0x08         ' }
+    4, 0x20, 0x10, 0x20, 0x10   '// ~
+    1, 0x00                   ' 127th...
+END Table
+
+END SUB
+
+'' A little Gimmik
+SUB EasterEgg
+ Stopscroll_SSD1306
+GLCDcls
+GLCDPrint 0, 0 + FAKE32,        "EasterEgg"
+FOR easter = 0 TO 20
+  set LEDD1 ON
+  WAIT 25 ms
+  set LEDD1 OFF
+  WAIT 25 ms
+NEXT easter  
+GLCDDrawString 0,0 + FAKE32,    "Braught to you by an old grunt"
+FOR easter = 0 TO 20
+  set LEDD1 ON
+  WAIT 25 ms
+  set LEDD1 OFF
+  WAIT 25 ms
+NEXT easter  
+
+GLCDDrawString 0,10 + FAKE32,   "Dedicated to my Son"
+FOR easter = 0 TO 20
+  set LEDD1 ON
+  WAIT 25 ms
+  set LEDD1 OFF
+  WAIT 25 ms
+NEXT easter  
+GLCDDrawString 0,20 + FAKE32,   "I am proud of You!"
+FOR easter = 0 TO 20
+  set LEDD1 ON
+  WAIT 25 ms
+  set LEDD1 OFF
+  WAIT 25 ms
+NEXT easter  
+GLCDDrawString 60,24 + FAKE32,  "by Darkdau"
+WAIT 3 s
+GLCDCLS
+END SUB
+'' This sub MagChange does only things, when Magazine is been pulled out
+SUB MagChange
+    IF MAGAZINE = 1 THEN	
+		epread EEMAGSTATE,MAGSTATE
+		epread EEMUN , ROUNDS
+		IF (ROUNDS > 0 AND ROUNDS < MUNMAX) THEN
+			epwrite EEMUN ,0
+			epwrite EEMAGSTATE, 0
+		ELSE
+			IF (ROUNDS = 0 AND MAGSTATE = 0) THEN
+				epwrite eemun ,MUNMAX
+				epwrite EEMAGSTATE, 1
+			END IF
+		END IF
+	END IF	
+END SUB
+
+'sub Voltage
+	'ad_val=ReadAD(an0)
+	'ad_val = ad_val *100
+    'ad_val= ad_val / 51 
+  'volts=str(ad_val)
+  'if ad_val<10 then
+    'volts="0.0"+left(volts,1,1)
+    'goto volt_format_done
+  'end if
+  'if ad_val<100 then
+    'volts="0."+mid(volts,1,2)
+  'else
+    'volts=left(volts,1,1)+"."+mid(volts,2,2)
+  'end if
+  'volt_format_done:
+  'end sub
+  ' sub Voltage reads and calcualate Volts and Hundtreths
+  SUB Voltage
+     AD_VAL = Readad10(An0)
+    'Scale/Map where 0.00 to 5.00V in  = 0 to 500 out
+    AD_VAL = [LONG]AD_Val * 500 / 1023 ;casting TO prevent overflow
+
+   'Modify for display
+    Volts = AD_VAL / 100   'Get volts
+    Hundredths = (AD_Val - (Volts * 100)) 'Get hundredths
+   END SUB
+  
+''
+'' Draw a Cartridge
+''  
+SUB Cartridge
+
+ 'box (10,3 + FAKE32,55,31 + FAKE32)               ; DRAW a Box
+
+ '' Single Round Begin
+ LINE (54,3 + FAKE32, 54,30 + FAKE32) '+ Pole
+ LINE (48,3 + FAKE32, 48,30 + FAKE32) 
+ PSET (49,2 + FAKE32,1)
+ PSET (53,2 + FAKE32,1)
+ PSET (50,1 + FAKE32,1)
+ PSET (52,1 + FAKE32,1)
+ PSET (50,0 + FAKE32,1)
+ PSET (51,0 + FAKE32,1)
+ PSET (52,0 + FAKE32,1)
+ LINE (49,31+ FAKE32, 53,31 + FAKE32) ' - Pole
+ BATT = 31 - (AD_VAL / 19)
+ If AD_VAL < LOWBATT THEN ' small correction for scaling
+	BATT = BATT + 1
+ END IF
+ If AD_VAL < ENDBATT THEN ' small correction for scaling
+	BATT = BATT + 2
+ END IF
+ 
+ if BATT < 3 THEN 
+	BATT = 3 
+ END IF
+ FOR Easter = FAKE32 +31 TO BATT +FAKE32 STEP -3
+    PSET  (50,Easter -3,0)
+    PSET  (51,Easter -3,0)
+    PSET  (52,Easter -3,0)
+	LINE  (50, Easter,52 ,EASTER)  
+ NEXT Easter 
+
+ END SUB
+ END
