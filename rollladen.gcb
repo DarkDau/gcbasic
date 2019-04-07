@@ -1,0 +1,1150 @@
+'''********************************************************************************
+'''  PIC: 18f25k22
+'''  Compiler: GCB
+'''  IDE: Geany
+'''
+'''  Board: Prototype Lochstreifenraster
+'''  Rollladensteuerung
+; ----- Configuration
+#CHIP 18F25K22, 16
+#OPTION EXPLICIT
+
+#INCLUDE <ds3231.h>  ' entferntes cls
+#INCLUDE <i2ceeprom.h>                 ; memory chips: at24c32 (storage capacity 32k)
+#INCLUDE "utils.h"
+#DEFINE AT24C32  0xAE                  ;Eeprom address
+#DEFINE EEPROM_DEVICE_1  0xAE          ;Eeprom address
+' muss ich noch vereinheitlichen
+; ----- DEFINE Hardware settings
+
+; DEFINE Hardware I2C settings FOR SSP module
+#DEFINE HI2C_BAUD_RATE 400
+#DEFINE HI2C_DATA PORTC.4
+#DEFINE HI2C_CLOCK PORTC.3
+;I2C pins need TO be INPUT FOR SSP module
+DIR HI2C_DATA in
+DIR HI2C_CLOCK in
+' MASTER I2C Device for SSP module
+HI2CMode Master
+
+#DEFINE LEDD1 PORTA.0
+#DEFINE LEDD2 PORTA.1
+#DEFINE LEDD3 PORTA.2
+#DEFINE LEDD4 PORTA.3
+#DEFINE REFLEX PORTC.5 ' IR Reflexlichtschranke
+DIR REFLEX IN
+#DEFINE clocktype   1               ;0 IS US OR 1 IS UK style
+#DEFINE debounce    50 mS            ;settling TIME FOR switches
+#DEFINE delay       200 mS          ;delay time FOR pushbutton
+#DEFINE recover		100 mS		;delay time for ADC
+#DEFINE pressed     0           ;flag FOR pressed pushbutton
+								; Negative Logik, 0 weil der Taster den Port auf GND zieht
+#DEFINE LED_ON		0			; Da die LED gegen +5V geschaltet
+#DEFINE LED_OFF		1			; ist 1 == aus und 0 == an
+#DEFINE upBut       portB.2      ;UP pushbutton
+#DEFINE downBut     portB.1       ;Down pushbutton
+#DEFINE modeBut     portB.0       ;Mode pushbutton
+
+
+
+
+DIR 	upBut 			IN
+DIR		downBut			IN
+DIR 	modeBut 		IN
+DIR     LEDD1         	OUT
+DIR     LEDD2         	OUT
+DIR     LEDD3         	OUT
+DIR     LEDD4         	OUT
+
+
+
+LEDD2 = LED_OFF
+LEDD1 = LED_OFF
+LEDD3 = LED_OFF
+LEDD4 = LED_OFF
+
+#INCLUDE <glcd.h>
+#DEFINE GLCD_TYPE GLCD_TYPE_SSD1306
+#DEFINE GLCD_I2C_Address 0x78
+#DEFINE GLCD_PROTECTOVERRUN
+#DEFINE GLCD_TYPE_SSD1306_CHARACTER_MODE_ONLY
+
+
+'*******************************************************************************************
+
+GLCDFontWidth = 6
+PrintString 1 , display_str 	'Rollladensteuerung
+GLCDPrint(0, 0,display_str) 	' 18 Zeichen sind auch das max.
+PrintString 2 , display_str 	'V0.1
+GLCDPrint(0, 18,display_str)
+glcdPrint(0,32,"V0.4")
+PrintString 4 ,display_str		'(c) Februar 2019
+GLCDPrint(0, 55,display_str)
+WAIT 1 s
+LEDD1 = LED_ON
+WAIT delay
+LEDD1 = LED_OFF
+LEDD2 = LED_ON
+WAIT delay
+LEDD2 = LED_OFF
+LEDD3 = LED_ON
+WAIT delay
+LEDD3 = LED_OFF
+LEDD4 = LED_ON
+WAIT delay
+LEDD4 = LED_OFF
+
+
+
+GLCDCLS
+
+
+
+;----- Variables
+
+DIM CENTURY_FLAG, POWERLOSS, EEPROMVAL, DAYSMAX, DAYSMAX ,xloop, poscnt AS BYTE
+DIM changed,ROLL,URLAUB AS BIT
+DIM HOUR, min, sec, am_pm, alHOUR ,almin, random_almin  AS BYTE
+DIM oldsec, display_off AS BYTE
+DIM DATE, MONTH, YEAR, DOW, century AS BYTE
+DIM mode, Oldmode, dayMax AS BYTE
+DIM OROLLOCNT,UROLLOCNT,JROLLOCNT,loopcnt AS BYTE
+DIM REFLEXVAL, REFLEXVAL1, REFLEXVAL2 AS BYTE
+DIM scrolltext AS STRING * 120
+'          "12345678901234567890123456789012345678901234567890123456789012345678901234567890" ; 80
+scrolltext="                  U/D=Auswahl M=Wert einstellen U,D gleichzeitig=Ende                  "
+DIM scroll,laenge AS BYTE
+#DEFINE maxtextdisplay 18 ' We can display a max of 18 Char in a row
+laenge=len(scrolltext)
+scroll=1 
+
+'EEPROM Adressen, 
+#DEFINE ROLLOHOCHCNT   		32000
+#DEFINE ROLLORUNTERCNT 		32001
+#DEFINE URLAUBSMODE			32002
+#DEFINE WERKTAGSHOCHHH		32003
+#DEFINE WERKTAGSHOCHMM		32004
+	
+#DEFINE WERKTAGSRUNTERHH	32005
+#DEFINE WERKTAGSRUNTERMM	32006
+
+#DEFINE WOCHENENDHOCHHH		32007
+#DEFINE WOCHENENDHOCHMM		32008
+
+#DEFINE WOCHENENDRUNTERHH	32009
+#DEFINE WOCHENENDRUNTERMM	32010
+
+DIM JUSTIFY AS STRING * 6
+DIM display_str AS STRING * 20
+DIM WOTAG AS STRING * 4
+
+oldsec = 255                        ; init value
+century = 20                        ; will be updated by Century calculation... IF a century roll ever occurs!! Required in THIS example code.
+UROLLOCNT=0
+OROLLOCNT=0
+display_off=0
+;----- Tables
+
+  table monthDays                     ;# of days in months. Required in THIS example code.
+    31
+    29                                ;leap years only
+    31
+    30
+    31
+    30
+    31
+    31
+    30
+    31
+    30
+    31
+  END table
+
+display_off= min
+   
+
+;----- Program
+Programmm_Anfang:
+
+WAIT 1 s
+glcdCLS
+
+  ; example uses of the DS3231 functions
+  ;
+  ; aging offset; cheap board from ebay! drifts
+                               ;  76543210                             
+  ;DS3231_WriteRegister ( 0x10, 0b01000001 )
+   ByteToBin( DS3231_ReadRegister ( 0x10) )
+  ; Example of setting the clock
+  ;   DS3231_SetClock( 15, 33 , 0 , 1 , 4 , 1 , 15 )  ;hours, minutes, seconds, DAY of week, DATE, MONTH, YEAR
+  DS3231_ReadDate(DOW, DATE, MONTH, YEAR, century_flag )   ;GET initial DATE
+  IF century_flag = 1 THEN
+     DS3231_HandleCentury ( century_flag, Century )
+  END IF
+
+  DS3231_ReadHourMode(mode)                 ;AND the current mode
+  DS3231_SetHourMode(mode)                  ;update HOUR mode from RTC
+  DS3231_EnableOscillator( true )           ;AND, ensure the clock IS running
+
+  ;
+  ;Example of configuration of the 32K OUTPUT AND the SQW
+  ;
+  DS3231_Set32kHz ( true )                  ;AND, enable the 32kHz OUTPUT (EN32kHz).
+  DS3231_EnableSQW
+  DS3231_DisableSQW
+
+
+;--------- Main body of program commences here. 
+Programm_nach_Begruessung:
+;----------------------------------------------
+DS3231_ReadDate(DOW, DATE, MONTH, YEAR, century_flag )   ;GET initial date. THIS IS required FOR main routine.
+IF century_flag = 1 THEN
+     DS3231_HandleCentury ( century_flag, Century )
+END IF
+DS3231_ReadHourMode(mode)                 ;AND the current mode
+eeprom_rd_byte(AT24C32, URLAUBSMODE, URLAUB)
+
+' initialise a tracking variable
+powerloss = false
+DIM EEpromAddress AS word
+EEpromAddress = 0
+
+DO
+    IF DS3231_OscillatorStopFlagStatus = true THEN           ; has a power loss occurred? AND the oscillator has stopped?
+      powerloss = true
+      DS3231_ClearOscillatorStopFlag
+    END IF
+    IF powerloss = true THEN
+       glcdPRINT(0,77,"!")
+    END IF
+
+    updateDisp                        ;show TIME AND DATE
+ 
+	steuerZeiten						; die Abfrage der Steuerzeiten
+'   glcdPrint(Spalte,Zeile,text)
+'	glcdPrint(0,40,"Urlaubsmin:")
+'	glcdPrint(75,40,"  ")
+'	glcdPrint(75,40,zufall)
+
+'	glcdPrint(0,40,"Aging:    :")  '
+'	glcdPrint(75,40,ByteToBin( DS3231_ReadRegister ( 0x10) ))
+'                  "123456789012345678"
+
+	glcdPrint(0,40,"REFLEX:")
+	REFLEXVAL1 = ReadAD ( AN17 )
+	WAIT recover  ' einfach zu schnell
+	REFLEXVAL2 = ReadAD ( AN17 )
+	REFLEXVAL = (REFLEXVAL1 + REFLEXVAL2 )/ 2
+	JUSTIFY = leftpad(STR(REFLEXVAL),3,"0")
+	glcdPrint(60,40,JUSTIFY)
+	glcdPrint(0,48,"U=Rollo Zeiten")
+	glcdPrint(0,56,"D=Urlaub M=Setup")
+	wait delay ' damit das Display nicht zu häufig refresht wird
+'	glcdPrint(82,40,min) 
+'	glcdPrint(99,40,display_off)
+
+
+    IF modeBut = pressed THEN
+		display_off=min
+		GLCDSetContrast(40)
+		LEDD2 = LED_OFF
+		changeMenu					; Auswahl Rollo oder TIME&DATE
+    END IF
+
+    IF downBut = pressed THEN
+    	display_off=min
+    	GLCDSetContrast(40)
+    	LEDD2 = LED_OFF
+		changeMode                      ;12 OR 24 HOUR mode NEIN URLAUB
+    END IF
+    IF upBut = pressed  THEN
+    	display_off=min
+    		GLCDSetContrast(40)
+    		LEDD2 = LED_OFF
+		changeAlarm				; Zeiten fuer Rollo Hoch und Runter		
+    END IF
+	IF (min - display_off) >1 OR (min - display_off) <0 THEN
+		GLCDSetContrast(0) ; Display aus
+		LEDD2 = LED_ON
+	END IF	
+
+  LOOP
+END
+END_of_Main:
+; -------- Main END ---------------
+
+;----- Subroutines ----------------
+  SUB printTime
+	JUSTIFY = leftpad(STR(HOUR),2,"0")
+	GLCDPrint(0, 0,JUSTIFY)
+    GLCDPrint(14, 0,":")
+	JUSTIFY = leftpad(STR(min),2,"0")
+	GLCDPrint(21, 0,JUSTIFY)
+	GLCDPrint(35, 0,":")
+	JUSTIFY = leftpad(STR(sec),2,"0")
+	GLCDPrint(42, 0,JUSTIFY)
+	GLCDPrint(56, 0," ")
+'	GLCDPrint(100,0,"   ")   ' DBG
+'	GLCDPrint(100,0,ROLLOCNT) ' DBG
+
+    IF URLAUB = TRUE THEN                             
+		GLCDPrint(63, 0,"Urlaub")
+    ELSE
+		GLCDPrint(63, 0,"      ")
+    END IF
+	WAIT delay
+  END SUB
+
+  ;-----
+SUB printDate
+    DayofWeek (DOW)
+    JUSTIFY = pad(WOTAG,5," ") 
+	GLCDPrint(0, 16,JUSTIFY)
+	JUSTIFY = leftpad(STR(DATE),2,"0") 
+	GLCDPrint(42, 16,JUSTIFY)
+	GLCDPrint(56, 16,".")
+	JUSTIFY = leftpad(STR(MONTH),2,"0") 
+	GLCDPrint(63, 16,JUSTIFY)
+	GLCDPrint(77, 16,".")
+	JUSTIFY = leftpad(STR(century),2,"0") 
+	GLCDPrint(84, 16,JUSTIFY)
+    JUSTIFY = leftpad(STR(YEAR),2,"0") 
+	GLCDPrint(98, 16,JUSTIFY)
+  END SUB
+
+
+  ;-----
+
+  SUB updateDisp
+    ;FOR best efficiency, DATE IS only updated ONCE a DAY
+    DS3231_ReadTime(HOUR, min, sec, am_pm)
+    IF oldsec <> sec THEN
+      IF !(HOUR | min | sec) THEN       ;TIME TO update
+        DS3231_ReadDate(DOW, DATE, MONTH, YEAR, century_flag )
+        ' Für URLAUB benoetige ich einmal am Tag einen Zufallswert
+        random_almin = zufall  ' 0-59 Minuten
+        IF century_flag = 1 THEN
+           DS3231_HandleCentury ( century_flag, Century )
+           glcdCLS
+        END IF
+      END IF
+      printTime                         ;show TIME
+      printdate
+      oldsec =  sec
+    END IF
+  END SUB
+
+  ;-----
+SUB changeMenu
+	changed = false
+    DO WHILE modeBut = pressed         ;WAIT FOR mode release
+      WAIT debounce
+    LOOP
+    glcdcls
+ 
+    PrintString 5 , display_str 'Change Menu
+    glcdPrint (0,0,display_str)
+    PrintString 6 , display_str 'Select which Setup
+    glcdPrint (0,16,display_str)
+    PrintString 7 , display_str 'Rollo - Time&Date
+    glcdPrint (0,32,display_str)
+    PrintString 8 , display_str '-----
+    glcdPrint (0,40,display_str)
+                   '123456789012345678
+    glcdPrint(0,48,"U=Rollo Endpunkte")               
+    glcdPrint(0,56,"D=Uhr    M=Selekt")
+    ROLL = true
+    wait delay
+    DO  forever
+		WAIT UNTIL ( upBut = pressed )  OR ( downBut = pressed ) OR (modeBut = pressed)
+		WAIT debounce
+		IF downBut = pressed THEN
+				PrintString 9 , display_str
+				glcdPrint (0,40,display_str) '       ----------
+				ROLL = false
+		END IF
+		IF upBut = pressed THEN
+			    PrintString 8 , display_str  '-----
+				glcdPrint (0,40,display_str) 
+				ROLL = true	
+		END IF
+		IF modeBut = pressed THEN
+			EXIT DO
+		END IF
+	LOOP	
+		
+		WAIT debounce
+		IF ROLL THEN
+			PrintString 10 , display_str 'Rollo setup        ,
+			glcdPrint (0,42,display_str)
+			wait delay
+			RolloHR
+		ELSE
+			PrintString 11 , display_str 'Time&Date setup    ,
+			glcdPrint (0,42,display_str)
+			WAIT delay
+			changeSetting
+		END IF	   
+END SUB
+
+
+  SUB changeSetting
+    changed = false                   ;assume no change will be made
+    DS3231_ReadHourMode(Oldmode)      ;AND the current mode
+    mode = 24                         ;ensure the display IS correct
+    DS3231_SetHourMode(24)            ;change settings in 24-hour mode
+	glcdcls
+    DO WHILE upBut = pressed         ;WAIT FOR up release
+      WAIT debounce
+    LOOP
+
+    IF clocktype = 0 THEN             ; handle US AND UK clock TYPE
+       SetMonth
+       SETDATE
+    ELSE
+       SETDATE
+       SetMonth
+    END IF
+    SetYear
+
+    ;***** DAY of the Week
+
+    ;glcdCLS
+    PrintString 12 , display_str 'Set Weekday:       ,
+    glcdprint(0,0, display_str) 
+    printDate
+    PrintString 13, display_str '---
+    glcdprint(0,30,display_str)
+                   '123456789012345678
+    glcdPrint(0,56,"D=naechste. M=Incr") 
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+        DOW++                         ;increment WHILE pressed
+        IF DOW > 7 THEN               ;1 = Sunday, etc.
+          DOW = 1
+        END IF
+        printDate
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+    LOOP WHILE upBut <> pressed
+    DO WHILE upBut = pressed         ;WAIT FOR Set release
+      WAIT debounce
+    LOOP
+    PrintString 14, display_str '   ,
+    glcdprint(0,30,display_str) 
+    ;***** HOUR
+    ;glcdCLS
+    PrintString 15, display_str 'Set Hours:        ,
+    glcdprint(0,16, display_str) 
+    IF OldMode = 12 AND am_pm THEN    ; make correction of AM_PM mode by adding 12 hours TO handle mode changes
+       HOUR = HOUR + 12
+    END IF
+    printTime
+    PrintString 16, display_str '--
+    glcdprint(0,8,display_str) 
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+        HOUR++                        ;increment WHILE pressed
+        IF HOUR > 23 THEN             ;remember, set in 24-hour mode
+          HOUR = 0
+        END IF
+        printTime
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+    LOOP WHILE upBut <> pressed
+    DO WHILE upBut = pressed         ;WAIT FOR Set release
+      WAIT debounce
+    LOOP
+    PrintString 17, display_str '  ,
+    glcdprint(0,8,display_str) 
+    ;***** Minutes
+
+    ;glcdCLS
+    PrintString 18, display_str 'Set Minutes:      ,
+    glcdprint(0,16,display_str)
+    printTime
+    PrintString 16, display_str '--
+    glcdprint(23,8,display_str)
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+        min++                         ;increment WHILE pressed
+        IF min > 59 THEN              ;0 TO 59 minutes
+          min = 0
+        END IF
+        printTime
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+    LOOP WHILE upBut <> pressed
+    DO WHILE upBut = pressed         ;WAIT FOR Set release
+      WAIT debounce
+    LOOP
+    PrintString 17, display_str '  ,
+    glcdprint(23,8,display_str) 
+    ;***** SECOND
+
+    ;glcdCLS
+    PrintString 19, display_str  'Set Seconds:      ,
+    glcdprint(0,16, display_str) 
+    printTime
+	glcdprint(40,8,"--")
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+        sec++                         ;increment WHILE pressed
+        IF sec > 59 THEN              ;0 TO 59 seconds
+          sec = 0
+        END IF
+        printTime
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+    LOOP WHILE upBut <> pressed
+    DO WHILE upBut = pressed         ;WAIT FOR Set release
+      WAIT debounce
+    LOOP
+	glcdprint(40,8,"  ")
+
+    ;***** Execute the NEW settings
+
+    IF changed THEN
+      glcdCLS
+      PrintString 20, display_str ' Press Up, or
+      glcdprint(0,32, display_str)
+      PrintString 21, display_str ' Mode to revert
+      glcdprint(0,48, display_str)
+
+      DO WHILE ((upBut <> pressed) OR (modeBut <> pressed))          ;WAIT FOR the UP OR Mode button
+        WAIT debounce
+        IF modeBut = pressed THEN
+           glcdCLS                           ;CLEAR last message
+           DS3231_SetHourMode(Oldmode)       ;RESTORE current mode
+           DS3231_ReadDate(DOW, DATE, MONTH, YEAR, century_flag )   ;GET initial DATE
+           DS3231_ReadHourMode(mode)                 ;AND the current mode
+           EXIT SUB                          ;DO NOT set, EXIT set routine
+        END IF
+        IF 	upBut = pressed THEN
+			glcdCLS                           ;CLEAR last message
+			DS3231_SetHourMode(24)                 ;change settings in 24-hour mode
+			DS3231_SetClock(HOUR, min, sec, DOW, DATE, MONTH, YEAR)
+			powerloss  = false                      ; RESET tracker variable
+			DS3231_ClearOscillatorStopFlag
+			DS3231_ReadDate(DOW, DATE, MONTH, YEAR, century_flag )   ;GET initial DATE
+			DS3231_ReadHourMode(mode)                 ;AND the current mode
+			EXIT SUB                          ;DO NOT set, EXIT set routine
+		END IF	
+       LOOP
+    END IF
+
+    DO WHILE (upBut = pressed)       ;WAIT FOR Set release
+    LOOP
+    WAIT debounce                     ;LET it settle
+    glcdCLS                               ;CLEAR last message
+    DS3231_SetHourMode(Oldmode)      ;RESTORE current mode
+    mode = Oldmode                    ;RESTORE mode
+  END SUB
+
+  ;-----
+
+  SUB changeMode
+    DS3231_SetHourMode(24)            ;change settings in 24-hour mode
+    mode = 24
+	eeprom_rd_byte(AT24C32, URLAUBSMODE, URLAUB)
+	IF URLAUB = TRUE THEN
+		URLAUB = FALSE
+	ELSE
+		URLAUB = TRUE
+		' Einmalig den Random Generator seeden, Weil alle
+		RANDOMIZE sec
+	END IF
+	eeprom_wr_byte(AT24C32, URLAUBSMODE, URLAUB)
+	
+    DO WHILE modeBut = pressed        ;WAIT FOR a release
+      WAIT debounce
+    LOOP
+  END SUB
+
+  SUB setMonth
+    ;***** MONTH
+    ;glcdCLS
+		PrintString 22,display_str 'Set Month:
+		glcdprint(0,0,display_str)
+		printDate
+		PrintString 16,display_str '--
+		glcdprint(63,30,"--")
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+        MONTH++                       ;increment WHILE pressed
+        IF MONTH > 12 THEN
+          MONTH = 1
+        END IF
+        printDate
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+      WAIT debounce
+    LOOP WHILE upBut <> pressed      ;Set moves you ON
+    readTable monthDays, MONTH, daysMax
+
+    DO WHILE upBut = pressed         ;WAIT FOR Set release
+	WAIT debounce
+    LOOP
+		PrintString 17,display_str '  ,
+		glcdprint(63,30,display_str)
+  END SUB
+
+
+
+  SUB SETDATE
+    ;***** DATE
+
+    ;glcdCLS
+    PrintString 23,display_str 'Set Date:     ,
+    glcdprint(0,0,display_str)
+    printDate
+    PrintString 16,display_str '--
+    glcdprint(42,30,display_str)
+
+    readTable monthDays, MONTH, daysMax
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+       DATE++                        ;increment WHILE pressed
+        IF DATE > daysMax THEN        ;stay within legal days
+          DATE = 1
+        END IF
+        printDate
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+      WAIT debounce
+    LOOP WHILE upBut <> pressed
+    DO WHILE upBut = pressed         ;WAIT FOR Set release	
+      WAIT debounce
+    LOOP
+		PrintString 17,display_str '  ,
+        glcdprint(42,30,display_str)
+
+  END SUB
+
+
+  SUB SetYear
+    ;***** YEAR
+
+    ;glcdCLS
+    PrintString 24,display_str 'Set Year:    ,
+       glcdprint(0,0,display_str)
+    printDate
+    PrintString 25,display_str '----
+    glcdprint(84,30,display_str)
+
+    DO
+      DO WHILE modeBut = pressed      ;Mode button held
+        YEAR++                        ;increment WHILE pressed
+        IF YEAR > 30 THEN             ;THIS NOT TO high 
+          YEAR = 0
+        END IF
+        printDate
+        WAIT WHILE modeBut = pressed  ;WAIT FOR repeat
+        changed = true                ;a change was made
+      LOOP
+      WAIT debounce
+    LOOP WHILE upBut <> pressed
+    DO WHILE upBut = pressed         ;WAIT FOR Set release
+      WAIT debounce
+    LOOP
+    PrintString 26,display_str '    ,
+    glcdprint(84,30,display_str)
+  END SUB
+
+SUB RolloHoch
+'	FilledBox (Xposition1, Yposition1, Xposition2, Yposition2, [Optional In LineColour 0 or 1] )
+
+	IF OROLLOCNT = 0 THEN
+		FilledBox (64, 28, 127, 63, 1) ' Rollo ganz zeichnen
+		PrintString 27,display_str ' HOCH
+		GLCDPrint (77,40,display_str)
+	END IF
+		Box (64, 28, 127, 63-OROLLOCNT, 0)
+	OROLLOCNT++
+   IF OROLLOCNT > 34 THEN
+		OROLLOCNT =0
+   END IF
+
+END SUB
+
+SUB RolloRunter
+'	FilledBox (Xposition1, Yposition1, Xposition2, Yposition2, [Optional In LineColour 0 or 1] )
+glcdcls
+DO forever
+	PrintString 28,display_str ' Endpunkt des ROLLO
+	glcdPrint (0,0,display_str)
+	PrintString 29,display_str ' mod=tief set=hoch
+	glcdPrint (0,10,display_str)
+	
+	IF UROLLOCNT = 0 THEN
+		FilledBox (64, 28, 127, 63, 0) ' Rollo ganz loeschen
+		PrintString 30,display_str ' Nach
+		glcdPrint (0,34,display_str)
+		PrintString 31,display_str ' unten
+		glcdPrint (0,42,display_str)
+	END IF
+		Box (64, 28, 127, 28+UROLLOCNT, 1)
+		JROLLOCNT= UROLLOCNT *3
+		IF JROLLOCNT >100 THEN
+			JROLLOCNT = 100
+		END IF
+		JUSTIFY = leftpad(STR(JROLLOCNT),3," 00") 
+		glcdPrint(20,52,JUSTIFY)
+		glcdPrint(40,52,"%")
+	UROLLOCNT++
+   IF UROLLOCNT > 34 THEN
+		UROLLOCNT =0
+   END IF
+   wait delay  ' im GLCD Text Mode ist das sonst viel zu schnell!
+LOOP
+END SUB
+
+SUB RolloHR
+glcdcls
+ROLL= false
+glcdprint( 0,0,"Oben=Up Unten=Dwn")
+glcdprint( 0,16,"Oberer Punkt :")
+DO forever
+	eeprom_rd_byte(AT24C32, ROLLOHOCHCNT, OROLLOCNT)
+	JROLLOCNT = OROLLOCNT *3
+	JUSTIFY = leftpad(STR(JROLLOCNT),3," 00") 
+	glcdPrint(98,16,JUSTIFY)
+	glcdPrint(122,16,"%")
+	glcdprint( 0,32,"Unterer Punkt:")
+	eeprom_rd_byte(AT24C32, ROLLORUNTERCNT, UROLLOCNT)
+	JROLLOCNT = UROLLOCNT *3
+	JUSTIFY = leftpad(STR(JROLLOCNT),3," 00") 
+	glcdPrint(98,32,JUSTIFY)
+	glcdPrint(122,32,"%")
+	                '123456789012345678
+	glcdprint( 0,56,"U=Ob D=Unt M=Ende")
+	wait delay ' sonst zu schnell
+	WAIT UNTIL ( (modeBut = pressed) OR (upBut = pressed) OR (downBut = pressed) )
+
+	IF upBut = pressed THEN
+		    RolloOben
+	END IF
+	IF downBut = pressed THEN
+			RolloUnten
+	END IF	
+	IF modeBut = pressed THEN
+		glcdcls
+		display_off= min
+		EXIT DO
+	END IF
+LOOP
+END SUB
+
+SUB RolloOben
+
+	IF upBut = pressed THEN
+			OROLLOCNT++
+			IF (OROLLOCNT * 3) >	100 THEN
+				OROLLOCNT = 0
+			END IF
+		eeprom_wr_byte(AT24C32, ROLLOHOCHCNT, OROLLOCNT)
+		ROLL = 1
+		glcdPrint(98,22,"----")
+		glcdPrint(98,38,"    ")
+
+	END IF	
+		
+END SUB
+
+
+SUB RolloUnten
+	IF downBut = pressed THEN
+			UROLLOCNT++
+			IF (UROLLOCNT * 3) >	100 THEN
+				UROLLOCNT = 0
+			END IF
+		eeprom_wr_byte(AT24C32, ROLLORUNTERCNT, UROLLOCNT)
+		ROLL=0
+		glcdPrint(98,38,"----")
+		glcdPrint(98,22,"    ")
+			
+	END IF	
+	
+	
+END SUB
+
+SUB changeAlarm
+	
+'WERKTAGSHOCHHH	   	Stunde Morgens
+'WERKTAGSHOCHMM	  	Minute Morgens
+
+'WERKTAGSRUNTERHH  	Stunde Abends
+'WERKTAGSRUNTERMM  	Minute Abends
+
+'WOCHENENDHOCHHH	Stunde Morgens
+'WOCHENENDHOCHMM	Minute Morgens
+
+'WOCHENENDRUNTERHH	Stunde Abends
+'WOCHENENDRUNTERMM  Minute Abends
+
+
+
+glcdcls
+glcdPrint(0,0,"Rollo Zeiten  ")
+
+' glcdPrint(Spalte,Zeile,text)
+
+glcdPrint(0,8,"--> Wochenende<---")
+glcdPrint(0,16,"Hoch     Runter")
+eeprom_rd_byte(AT24C32, WOCHENENDHOCHHH, HOUR)
+JUSTIFY = leftpad(STR(HOUR),2,"0")
+glcdPrint(0,24,JUSTIFY)
+glcdPrint(16,24,":")
+eeprom_rd_byte(AT24C32, WOCHENENDHOCHMM, min)
+JUSTIFY = leftpad(STR(min),2,"0")
+glcdPrint(22,24,JUSTIFY)
+eeprom_rd_byte(AT24C32, WOCHENENDRUNTERHH, HOUR)
+JUSTIFY = leftpad(STR(HOUR),2,"0")
+glcdPrint(64,24,JUSTIFY)
+glcdPrint(80,24,":")
+eeprom_rd_byte(AT24C32, WOCHENENDRUNTERMM, min)
+JUSTIFY = leftpad(STR(min),2,"0")
+glcdPrint(86,24,JUSTIFY)
+
+glcdPrint(0,32,"---> Werktags <---")
+glcdPrint(0,40,"Hoch     Runter")
+eeprom_rd_byte(AT24C32, WERKTAGSHOCHHH, HOUR)
+JUSTIFY = leftpad(STR(HOUR),2,"0")
+glcdPrint(0,48,JUSTIFY)
+glcdPrint(16,48,":")
+eeprom_rd_byte(AT24C32, WERKTAGSHOCHMM, min)
+JUSTIFY = leftpad(STR(min),2,"0")
+glcdPrint(22,48,JUSTIFY)
+eeprom_rd_byte(AT24C32, WERKTAGSRUNTERHH, HOUR)
+JUSTIFY = leftpad(STR(HOUR),2,"0")
+glcdPrint(64,48,JUSTIFY)
+glcdPrint(80,48,":")
+eeprom_rd_byte(AT24C32, WERKTAGSRUNTERMM, min)
+JUSTIFY = leftpad(STR(min),2,"0")
+glcdPrint(86,48,JUSTIFY)
+
+poscnt =1
+DO forever
+	WHILE ( modeBut <> pressed AND upBut <> pressed AND downBut <> pressed)
+		WAIT debounce
+		menuLine
+    LOOP
+	IF modeBut = pressed THEN ' der modeBut zuerst
+		changeHM (poscnt)
+	END IF
+	IF (upBut = pressed) AND (downBut = pressed) THEN
+		GOTO Programmm_Anfang
+	END IF
+	IF upBut = pressed THEN
+		poscnt++
+	END IF
+	IF downBut = pressed THEN
+		poscnt--
+	END IF
+	IF poscnt >8 THEN	
+		poscnt = 1
+	END IF
+	IF poscnt <1 THEN
+		poscnt =8
+	END IF
+'                  "123456789012345678"
+
+
+' Den richtigen Abschnitt zum Blinken bringen	
+
+	 SELECT CASE poscnt
+		CASE 1:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,16,"         Runter")
+			glcdPrint(0,24,"  ")	
+			WAIT delay
+			glcdPrint(0,16,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WOCHENENDHOCHHH, HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(0,24,JUSTIFY)
+			
+			WAIT delay
+		NEXT	
+		CASE 2:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,16,"         Runter")
+			glcdPrint(22,24,"  ")	
+			WAIT delay
+			glcdPrint(0,16,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WOCHENENDHOCHMM, min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(22,24,JUSTIFY)
+			menuLine
+			WAIT delay
+		NEXT		
+		CASE 3:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,16,"Hoch           ")
+			glcdPrint(64,24,"  ")	
+			WAIT delay
+			glcdPrint(0,16,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WOCHENENDRUNTERHH, HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(64,24,JUSTIFY)
+			
+			WAIT delay
+		NEXT
+		CASE 4:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,16,"Hoch           ")
+			glcdPrint(86,24,"  ")	
+			WAIT delay
+			glcdPrint(0,16,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WOCHENENDRUNTERMM, min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(86,24,JUSTIFY)
+			menuLine
+			WAIT delay
+		NEXT
+		CASE 5:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,40,"         Runter")
+			glcdPrint(0,48,"  ")	
+			WAIT delay
+			glcdPrint(0,40,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WERKTAGSHOCHHH, HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(0,48,JUSTIFY)
+			menuLine
+			WAIT delay
+		NEXT	
+		CASE 6:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,40,"         Runter")
+			glcdPrint(22,48,"  ")	
+			WAIT delay
+			glcdPrint(0,40,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WERKTAGSHOCHMM, min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(22,48,JUSTIFY)
+			
+			WAIT delay
+		NEXT	
+		CASE 7:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,40,"Hoch           ")
+			glcdPrint(64,48,"  ")	
+			WAIT delay
+			glcdPrint(0,40,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WERKTAGSRUNTERHH, HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(64,48,JUSTIFY)
+			menuLine
+			WAIT delay
+		NEXT
+		CASE 8:
+		FOR loopcnt = 1 TO 3
+			glcdPrint(0,40,"Hoch           ")
+			glcdPrint(86,48,"  ")	
+			WAIT delay
+			glcdPrint(0,40,"Hoch     Runter")
+			eeprom_rd_byte(AT24C32, WERKTAGSRUNTERMM, min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(86,48,JUSTIFY)
+			
+			WAIT delay
+		NEXT
+    END SELECT		
+	
+
+LOOP
+glcdcls
+
+END SUB
+
+
+SUB changeHM (poscnt)
+
+		 SELECT CASE poscnt
+		CASE 1:
+			eeprom_rd_byte(AT24C32, WOCHENENDHOCHHH, HOUR)
+			HOUR++
+			checkHour(HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(0,24,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WOCHENENDHOCHHH, HOUR)
+		CASE 2:
+			eeprom_rd_byte(AT24C32, WOCHENENDHOCHMM, min)
+			min=min +5
+			checkMinute(min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(22,24,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WOCHENENDHOCHMM, min)
+		CASE 3:
+			eeprom_rd_byte(AT24C32, WOCHENENDRUNTERHH, HOUR)
+			HOUR++
+			checkHour(HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(64,24,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WOCHENENDRUNTERHH, HOUR)
+		CASE 4:
+			eeprom_rd_byte(AT24C32, WOCHENENDRUNTERMM, min)
+			min=min +5
+			checkMinute(min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(86,24,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WOCHENENDRUNTERMM, min)
+		CASE 5:
+			eeprom_rd_byte(AT24C32, WERKTAGSHOCHHH, HOUR)
+			HOUR++
+			checkHour(HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(0,48,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WERKTAGSHOCHHH, HOUR)
+		CASE 6:
+			eeprom_rd_byte(AT24C32, WERKTAGSHOCHMM, min)
+			min=min +5
+			checkMinute(min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(22,48,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WERKTAGSHOCHMM, min)	
+		CASE 7:
+			eeprom_rd_byte(AT24C32, WERKTAGSRUNTERHH, HOUR)
+			HOUR++
+			checkHour(HOUR)
+			JUSTIFY = leftpad(STR(HOUR),2,"0")
+			glcdPrint(64,48,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WERKTAGSRUNTERHH, HOUR)			
+		CASE 8:
+			eeprom_rd_byte(AT24C32, WERKTAGSRUNTERMM, min)
+			min=min +5
+			checkMinute(min)
+			JUSTIFY = leftpad(STR(min),2,"0")
+			glcdPrint(86,48,JUSTIFY)
+			eeprom_wr_byte(AT24C32, WERKTAGSRUNTERMM, min)
+    END SELECT
+	
+END SUB
+
+SUB checkHour(HOUR)
+	IF HOUR >23 THEN
+		HOUR = 0
+	END IF
+END SUB
+SUB checkMinute(min)
+	IF min >59 THEN
+		min = 0
+	END IF
+END SUB
+
+
+
+
+FUNCTION DayofWeek (DOW AS BYTE) AS STRING
+    SELECT CASE DOW      ;DAY of the week
+      CASE 1:
+        WOTAG ="Son"
+      CASE 2:
+        WOTAG ="Mon" 
+      CASE 3:
+        WOTAG ="Die"
+      CASE 4:
+        WOTAG ="Mit" 
+      CASE 5:
+        WOTAG ="Don" 
+      CASE 6:
+        WOTAG ="Frei"
+      CASE 7:
+         WOTAG ="Sam"
+      CASE ELSE
+		WOTAG="Err"
+    END SELECT
+END FUNCTION
+
+
+
+SUB steuerZeiten
+' in DOW steht der Wochentag
+' Wochenende ist DOW 1 und 7
+' HOUR und min werden regelmäßig ausgelesen
+IF (DOW = 1 OR DOW = 7) THEN
+	'Wochenende
+	eeprom_rd_byte(AT24C32, WOCHENENDHOCHHH, alHOUR)
+	IF alHOUR = HOUR THEN
+		IF URLAUB = TRUE THEN
+			almin = random_almin 
+		ELSE	
+			eeprom_rd_byte(AT24C32, WOCHENENDHOCHMM, almin)
+		END IF	
+		IF almin = min THEN
+			relaisHoch
+		END IF	
+	END IF
+	
+	eeprom_rd_byte(AT24C32, WOCHENENDRUNTERHH, alHOUR)
+	IF alHOUR = HOUR THEN
+		IF URLAUB = TRUE THEN
+			almin = random_almin
+		ELSE	
+			eeprom_rd_byte(AT24C32, WOCHENENDRUNTERMM, almin)
+		END IF
+		IF almin = min THEN
+			relaisRunter
+		END IF	
+	END IF	
+	
+ELSE
+'Wochentags
+	eeprom_rd_byte(AT24C32, WERKTAGSHOCHHH, alHOUR)
+	IF alHOUR = HOUR THEN
+		eeprom_rd_byte(AT24C32, WERKTAGSHOCHMM, almin)
+		IF almin = min THEN
+			relaisHoch
+		END IF	
+	END IF
+	
+	eeprom_rd_byte(AT24C32, WERKTAGSRUNTERHH, alHOUR)
+	IF alHOUR = HOUR THEN
+		eeprom_rd_byte(AT24C32, WERKTAGSRUNTERMM, almin)
+		IF almin = min THEN
+			relaisRunter
+		END IF	
+	END IF	
+	
+END IF
+
+
+END SUB
+
+
+
+SUB relaisHoch
+LEDD3 = LED_ON
+WAIT 3 s
+LEDD3 = LED_OFF
+
+END SUB
+
+SUB relaisRunter
+LEDD4 = LED_ON
+WAIT 3 s
+LEDD4 = LED_OFF
+
+END SUB
+
+Function Zufall 
+Zufall =(RANDOM / 5) + (RANDOM / 46)  ' 0-51 Minuten
+
+END Function
+
+function menuLine
+	glcdPrint(0,56,mid(scrolltext,scroll,maxtextdisplay))
+	wait delay
+	scroll++
+	IF scroll=laenge - maxtextdisplay THEN
+		scroll=1
+	END IF
+
+end function
+
